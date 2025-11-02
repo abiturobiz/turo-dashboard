@@ -1,5 +1,6 @@
 # download_turo_csv.py
 import re
+import os
 import time, argparse, subprocess
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
@@ -96,33 +97,41 @@ def click_download_and_save(page):
 
 def main(headless: bool):
     ensure_dirs()
+    storage_state_path = os.environ.get("AUTH_STORAGE_STATE", "").strip()
+
     with sync_playwright() as p:
-        browser = p.chromium.launch_persistent_context(
-            user_data_dir=str(USER_DATA_DIR),
-            headless=headless,
-            accept_downloads=True,
-            # slow_mo=100,  # uncomment to slow actions for visibility
-        )
-        # Be generous with default timeouts to avoid premature failures
-        browser.set_default_timeout(5 * 60 * 1000)  # 5 minutes
-        try:
+        if storage_state_path and Path(storage_state_path).exists():
+            # CI path: normal browser + context from storage_state
+            browser = p.chromium.launch(headless=headless)
+            context = browser.new_context(storage_state=storage_state_path, accept_downloads=True)
+            page = context.new_page()
+        else:
+            # Local path: persistent context with your saved profile
+            browser = p.chromium.launch_persistent_context(
+                user_data_dir=str(USER_DATA_DIR),
+                headless=headless,
+                accept_downloads=True,
+            )
             page = browser.new_page()
+
+        browser.set_default_timeout(5 * 60 * 1000)
+        try:
             go_to_earnings(page)
-
-            # If this is effectively your first run (no valid cookies), give time to log in
-            # Heuristic: if we don't see any CSV text quickly, switch to manual-login mode
             try:
-                page.locator("text=CSV").first.wait_for(state="visible", timeout=3000)
-            except PWTimeout:
-                wait_for_manual_login(page)
-
-            # Make sure we’re on earnings (in case you navigated elsewhere)
+                page.get_by_text(re.compile(r"csv", re.I)).first.wait_for(state="visible", timeout=3000)
+            except Exception:
+                if not storage_state_path:
+                    wait_for_manual_login(page)
             go_to_earnings(page)
             csv_path = click_download_and_save(page)
         finally:
-            browser.close()
+            # close the right thing
+            if storage_state_path:
+                context.close()
+                browser.close()
+            else:
+                browser.close()
 
-    # Run ETL after successful download
     subprocess.run(ETL_CMD, check=True)
 
 if __name__ == "__main__":

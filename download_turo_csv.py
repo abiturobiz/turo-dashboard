@@ -41,58 +41,62 @@ def wait_for_manual_login(page):
     except PWTimeout:
         pass  # We'll rely on your ENTER press
 
-def click_download_and_save(page):
+def click_download_and_save(page: Page) -> Path:
     """
-    Find and click the 'Download CSV' control using several robust locators.
-    Saves the downloaded file to data/turo_csv/ and returns the path.
+    Attempts to trigger the CSV download and save to data/turo_csv/.
+    Searches main page and iframes. Dumps debug artifacts if not found.
     """
-    # Try a few likely selectors in order of preference
-    candidate_locators = [
-        # Accessible roles (button or link) with name containing CSV
-        page.get_by_role("button", name=re.compile(r"download\s*csv", re.I)),
-        page.get_by_role("link",   name=re.compile(r"download\s*csv", re.I)),
+    # Wait for page to be stable-ish
+    try:
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except PWTimeout:
+        pass
 
-        # Generic "CSV" fallback (sometimes the control just says CSV)
-        page.get_by_role("button", name=re.compile(r"csv", re.I)),
-        page.get_by_role("link",   name=re.compile(r"csv", re.I)),
+    # Try main page first
+    if _find_and_click_csv(page):
+        with page.expect_download(timeout=30000) as dl:
+            # if click already happened, the download event should fire shortly
+            pass
+        download = dl.value
+        stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        target = CSV_DIR / f"turo_earnings_{stamp}.csv"
+        download.save_as(str(target))
+        return target
 
-        # Text-based locator
-        page.get_by_text(re.compile(r"download\s*csv", re.I)),
-
-        # CSS/XPath fallbacks (adjust if you discover a stable attribute)
-        page.locator("button:has-text('CSV')"),
-        page.locator("a:has-text('CSV')"),
-
-        # Absolute last resort: any anchor that looks like a CSV download
-        page.locator("a[href$='.csv']"),
-    ]
-
-    last_error = None
-    for loc in candidate_locators:
+    # Try inside iframes (some apps render the earnings table in an iframe)
+    for f in page.frames:
+        if f == page.main_frame:
+            continue
         try:
-            loc.wait_for(state="visible", timeout=60_000)  # wait up to 60s
-            with page.expect_download(timeout=300_000) as dl_info:  # 5 min
-                loc.click()
-            download = dl_info.value
-            ts = time.strftime("%Y%m%d-%H%M%S")
-            out_path = DOWNLOAD_DIR / f"turo_earnings_{ts}.csv"
-            download.save_as(out_path)
-            print(f"Saved: {out_path}")
-            return out_path
-        except Exception as e:
-            last_error = e
+            # quick heuristic to skip ad/analytics frames
+            if any(x in (f.url or "") for x in ["ads", "doubleclick", "googletag"]):
+                continue
+            if _find_and_click_csv(f):
+                with page.expect_download(timeout=30000) as dl:
+                    pass
+                download = dl.value
+                stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+                target = CSV_DIR / f"turo_earnings_{stamp}.csv"
+                download.save_as(str(target))
+                return target
+        except Exception:
             continue
 
-    # If we get here, none of the locators worked—dump a screenshot for debugging.
-    debug_png = Path("out") / "debug_earnings_page.png"
-    debug_png.parent.mkdir(parents=True, exist_ok=True)
-    page.screenshot(path=str(debug_png), full_page=True)
-    print(f"[debug] Could not find a download control. Saved a screenshot at: {debug_png}")
-    print(f"[debug] Current URL: {page.url}")
-    raise SystemExit(
-        "Could not find the 'Download CSV' button/link. "
-        "Inspect the screenshot and, if needed, update the selector to a stable attribute."
-    ) from last_error
+    # Nothing worked — dump artifacts and raise
+    html_path = DEBUG_DIR / "debug_earnings_page.html"
+    png_path  = DEBUG_DIR / "debug_earnings_page.png"
+    try:
+        html = page.content()
+        html_path.write_text(html, encoding="utf-8")
+        page.screenshot(path=str(png_path), full_page=True)
+    except Exception:
+        pass
+
+    cur_url = page.url
+    raise RuntimeError(
+        "Could not find the 'Download CSV' control. "
+        f"Saved debug HTML at {html_path}, screenshot at {png_path}. Current URL: {cur_url}"
+    )
 
 
 def main(headless: bool):

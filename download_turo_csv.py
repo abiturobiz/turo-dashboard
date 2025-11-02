@@ -101,12 +101,10 @@ def main(headless: bool):
 
     with sync_playwright() as p:
         if storage_state_path and Path(storage_state_path).exists():
-            # CI path: normal browser + context from storage_state
             browser = p.chromium.launch(headless=headless)
             context = browser.new_context(storage_state=storage_state_path, accept_downloads=True)
             page = context.new_page()
         else:
-            # Local path: persistent context with your saved profile
             browser = p.chromium.launch_persistent_context(
                 user_data_dir=str(USER_DATA_DIR),
                 headless=headless,
@@ -114,7 +112,9 @@ def main(headless: bool):
             )
             page = browser.new_page()
 
-        browser.set_default_timeout(5 * 60 * 1000)
+        # ✅ Correct: apply timeout on the PAGE, not the BROWSER
+        page.set_default_timeout(5 * 60 * 1000)
+
         try:
             go_to_earnings(page)
             try:
@@ -125,7 +125,6 @@ def main(headless: bool):
             go_to_earnings(page)
             csv_path = click_download_and_save(page)
         finally:
-            # close the right thing
             if storage_state_path:
                 context.close()
                 browser.close()
@@ -133,6 +132,7 @@ def main(headless: bool):
                 browser.close()
 
     subprocess.run(ETL_CMD, check=True)
+
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()

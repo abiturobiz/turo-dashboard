@@ -1,4 +1,4 @@
-cat > requirements.txt <<'EOF'
+cat > requirements.txt << 'EOF'
 streamlit==1.39.0
 duckdb==1.1.3
 pandas==2.2.3

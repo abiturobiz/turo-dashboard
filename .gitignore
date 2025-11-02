@@ -1,0 +1,6 @@
+.venv311/
+data/
+out/
+run.log
+__pycache__/
+*.pyc

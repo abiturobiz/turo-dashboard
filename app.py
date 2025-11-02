@@ -8,6 +8,13 @@ DB_PATH = Path("turo.duckdb")  # change if needed
 
 st.set_page_config(page_title="Turo Earnings Dashboard", layout="wide")
 
+import os, time, duckdb, pandas as pd, streamlit as st
+
+# Auto-refresh every 5 minutes (300000 ms) so the page updates after ETL runs
+st_autorefresh = st.experimental_rerun  # Streamlit Cloud reruns on change; for timed refresh:
+st.experimental_set_query_params(ts=int(time.time()))  # no-op to avoid caching on first run
+
+
 @st.cache_data(show_spinner=False)
 def load_data(db_path: Path):
     if not db_path.exists():
@@ -265,6 +272,11 @@ with colB:
         ct.to_csv(index=False).encode("utf-8"),
         file_name="category_breakdown.csv",
         mime="text/csv"
+con = duckdb.connect("turo.duckdb")
+last_dt = con.execute("select max(month) from rpt_month_vehicle_total").fetchone()[0]
+con.close()
+st.markdown(f"**Last updated month in DB:** `{last_dt}`")
+
     )
 
 st.caption("Data source: turo.duckdb → rpt_month_vehicle_total & rpt_month_vehicle_category")

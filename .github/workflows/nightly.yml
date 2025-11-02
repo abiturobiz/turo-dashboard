@@ -1,0 +1,51 @@
+name: Update Turo Dashboard Nightly
+
+on:
+  schedule:
+    - cron: "10 5 * * *"   # runs daily at 5:10 UTC (~12:10 AM EST)
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to push updated data
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Restore Playwright storage_state.json
+        env:
+          TURO_STORAGE_STATE_B64: ${{ secrets.TURO_STORAGE_STATE_B64 }}
+        run: |
+          mkdir -p auth
+          echo "$TURO_STORAGE_STATE_B64" | base64 -d > auth/storage_state.json
+          test -s auth/storage_state.json || (echo "storage_state missing" && exit 1)
+
+      - name: Run downloader + ETL
+        env:
+          AUTH_STORAGE_STATE: auth/storage_state.json
+        run: |
+          python download_turo_csv.py --headless
+          python etl_turo_earnings.py --csv_dir data/turo_csv --db turo.duckdb
+
+      - name: Commit updated data
+        run: |
+          git config user.name  "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add -A data/turo_csv turo.duckdb || true
+          git commit -m "Nightly data refresh" || echo "No changes to commit"
+
+      - name: Push
+        run: git push

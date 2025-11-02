@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """
 download_turo_csv.py
-- Navigates to Turo Host Earnings
-- Clicks the CSV/Export control robustly
-- Saves CSV into data/turo_csv/
-- Runs ETL to update turo.duckdb
 
-Supports two modes:
-- LOCAL (default): persistent profile; will pause for manual login if needed.
-- CI: if AUTH_STORAGE_STATE is set and points to a storage_state.json file,
-      uses that cookie to avoid MFA. (Headless recommended.)
+- Navigates to Turo Host Earnings
+- Robustly finds & clicks the CSV/Export control
+- Saves CSV to data/turo_csv/
+- Runs ETL (etl_turo_earnings.py) to update turo.duckdb
+
+Usage:
+  Local (interactive profile):
+    python download_turo_csv.py
+    # or headless:
+    python download_turo_csv.py --headless
+
+  CI (GitHub Actions):
+    export AUTH_STORAGE_STATE=auth/storage_state.json
+    python download_turo_csv.py --headless
 """
 
 import os
@@ -23,7 +29,7 @@ from datetime import datetime
 from playwright.sync_api import (
     sync_playwright,
     TimeoutError as PWTimeout,
-    Page,  # for type hints
+    Page,  # type hints
 )
 
 # ----------------------------
@@ -31,54 +37,55 @@ from playwright.sync_api import (
 # ----------------------------
 CSV_DIR = Path("data/turo_csv")
 OUT_DIR = Path("out")
-USER_DATA_DIR = Path(".pw-user")  # local persistent profile
+USER_DATA_DIR = Path(".pw-user")  # local persistent chromium profile
 CSV_DIR.mkdir(parents=True, exist_ok=True)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 ETL_CMD = ["python", "etl_turo_earnings.py", "--csv_dir", str(CSV_DIR), "--db", "turo.duckdb"]
 EARNINGS_URL = "https://turo.com/host/earnings"
 
-# ----------------------------
-# Helpers
-# ----------------------------
 
-def ensure_dirs():
+# ----------------------------
+# Utilities
+# ----------------------------
+def ensure_dirs() -> None:
     CSV_DIR.mkdir(parents=True, exist_ok=True)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-def log(msg: str):
+
+def log(msg: str) -> None:
     print(f"[download] {msg}", flush=True)
 
-def wait_for_manual_login(page: Page):
+
+def wait_for_manual_login(page: Page) -> None:
     """
     LOCAL use only: let the user finish interactive login/MFA,
-    then press ENTER in the terminal to continue.
+    then press ENTER in terminal to continue.
     """
     page.bring_to_front()
     log("\n==> Please complete Turo login in the opened browser window.")
-    log("    After you see the Earnings page fully loaded, return to the terminal and press ENTER.")
-    input("==> When ready, press ENTER to continue... ")
+    log("    After you SEE the Earnings page, return here and press ENTER.")
+    input("==> Press ENTER to continue... ")
 
-def go_to_earnings(page: Page):
+
+def go_to_earnings(page: Page) -> None:
     """
-    Navigate (or re-navigate) to the Earnings page and wait for signs it loaded.
+    Navigate (or re-navigate) to the Earnings page and wait for signals that it rendered.
     """
     page.goto(EARNINGS_URL, wait_until="domcontentloaded")
-    # Try a few signals that the page is ready
     try:
-        # Heading or page text that indicates earnings view
         page.get_by_role("heading", name=re.compile(r"earning|payout|trip", re.I)).first.wait_for(timeout=10_000)
     except Exception:
         try:
             page.get_by_text(re.compile(r"earning|payout|export|csv|trips|month", re.I)).first.wait_for(timeout=10_000)
         except Exception:
-            # Fall back to networkidle
             try:
                 page.wait_for_load_state("networkidle", timeout=10_000)
             except PWTimeout:
                 pass
 
-def _close_banners(scope):
+
+def _close_banners(scope: Page) -> None:
     """Dismiss cookie/consent banners or toasts that may cover controls."""
     for txt in [
         r"Accept( all)? cookies",
@@ -97,7 +104,8 @@ def _close_banners(scope):
     except Exception:
         pass
 
-def _candidate_locators(scope):
+
+def _candidate_locators(scope: Page):
     """
     Build a list of locator factories to try for CSV/Export.
     Each returns a Locator when called.
@@ -109,8 +117,8 @@ def _candidate_locators(scope):
         r"Download CSV",
         r"Export CSV",
         r"Export .*CSV",
-        r"Export",
-        r"Download",
+        r"\bExport\b",
+        r"\bDownload\b",
         r"Download report",
     ]:
         locs.append(lambda s=scope, l=label: s.get_by_role("button", name=re.compile(l, re.I)))
@@ -138,21 +146,23 @@ def _candidate_locators(scope):
         "a[href*='.csv?']",
     ]:
         locs.append(lambda s=scope, css=sel: s.locator(css))
+
     return locs
 
-def _find_and_click_csv(scope) -> bool:
+
+def _find_and_click_csv(scope: Page) -> bool:
     """
     Try to click a CSV/Export control within this scope.
     Returns True if a click was performed that should trigger a download.
     """
     _close_banners(scope)
 
-    # Direct try: buttons/links/anchors that are already visible
+    # Direct: buttons/links/anchors that are visible
     for make in _candidate_locators(scope):
         try:
             loc = make()
             if loc and loc.count() > 0:
-                # Prefer one that's visible
+                # Prefer visible
                 for i in range(min(loc.count(), 6)):
                     el = loc.nth(i)
                     if el.is_visible():
@@ -174,8 +184,11 @@ def _find_and_click_csv(scope) -> bool:
                 except Exception:
                     pass
             # generic text as a fallback
-            scope.get_by_text(re.compile(r"\bCSV\b", re.I)).first.click(timeout=1500)
-            return True
+            try:
+                scope.get_by_text(re.compile(r"\bCSV\b", re.I)).first.click(timeout=1500)
+                return True
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -188,19 +201,26 @@ def _find_and_click_csv(scope) -> bool:
             for txt in [r"\bExport\b", r"\bDownload\b"]:
                 try:
                     scope.get_by_role("menuitem", name=re.compile(txt, re.I)).first.click(timeout=1500)
-                    # then CSV
+                    # then CSV inside submenu
                     for t2 in [r"\bCSV\b", r"Export CSV", r"Download CSV"]:
                         try:
                             scope.get_by_text(re.compile(t2, re.I)).first.click(timeout=1500)
                             return True
                         except Exception:
                             pass
-            scope.get_by_text(re.compile(r"\bCSV\b", re.I)).first.click(timeout=1500)
-            return True
+                except Exception:
+                    pass  # continue outer for loop
+            # fallback if still nothing clicked
+            try:
+                scope.get_by_text(re.compile(r"\bCSV\b", re.I)).first.click(timeout=1500)
+                return True
+            except Exception:
+                pass
     except Exception:
         pass
 
     return False
+
 
 def click_download_and_save(page: Page) -> Path:
     """
@@ -258,10 +278,10 @@ def click_download_and_save(page: Page) -> Path:
 
     raise RuntimeError("Could not find the 'Download CSV' control. Inspect debug artifacts and adjust selectors.")
 
+
 # ----------------------------
 # Main flow
 # ----------------------------
-
 def main(headless: bool):
     ensure_dirs()
     storage_state_path = os.environ.get("AUTH_STORAGE_STATE", "").strip()
@@ -283,26 +303,24 @@ def main(headless: bool):
             )
             page = browser.new_page()
 
-        # Apply a generous timeout on the PAGE (not browser)
+        # Apply a generous timeout on the PAGE (not on Browser)
         page.set_default_timeout(5 * 60 * 1000)
 
         try:
             go_to_earnings(page)
 
-            # If headless CI and page still not exposing export, we rely purely on selectors.
-            # If LOCAL and not logged in, allow interactive login:
+            # Local non-headless: if not seeing export quickly, allow interactive login
             if not storage_state_path and not headless:
                 try:
-                    # If "CSV" or "Export" control isn't found quickly, prompt user to login
                     page.get_by_text(re.compile(r"export|csv", re.I)).first.wait_for(timeout=3000)
                 except Exception:
                     wait_for_manual_login(page)
                     go_to_earnings(page)
 
             # Attempt the download
-            csv_path = click_download_and_save(page)
+            _ = click_download_and_save(page)
+
         finally:
-            # Close appropriately
             try:
                 if storage_state_path:
                     context.close()
@@ -317,10 +335,10 @@ def main(headless: bool):
     subprocess.run(ETL_CMD, check=True)
     log("ETL complete.")
 
+
 # ----------------------------
 # CLI
 # ----------------------------
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Download Turo earnings CSV and run ETL.")
     parser.add_argument("--headless", action="store_true", help="Run in headless mode (CI friendly).")

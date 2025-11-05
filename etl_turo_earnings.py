@@ -1,5 +1,6 @@
 # etl_turo_earnings.py — tailored to your CSV headers
 import argparse, re, duckdb, pandas as pd
+from typing import List, Tuple
 from pathlib import Path
 
 DB_DEFAULT = "turo.duckdb"

@@ -2,6 +2,7 @@
 import duckdb, pandas as pd, numpy as np
 import streamlit as st
 import plotly.express as px
+from typing import List, Tuple
 from pathlib import Path
 
 DB_PATH = Path("turo.duckdb")  # change if needed

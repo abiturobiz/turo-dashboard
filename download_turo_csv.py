@@ -25,6 +25,8 @@ import argparse
 import subprocess
 from pathlib import Path
 from datetime import datetime
+from typing import List, Tuple
+
 
 from playwright.sync_api import (
     sync_playwright,

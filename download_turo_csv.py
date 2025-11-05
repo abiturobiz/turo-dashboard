@@ -221,6 +221,47 @@ def _find_and_click_csv(scope: Page) -> bool:
 
     return False
 
+def _visible_texts(loc) -> List[str]:
+    out = []
+    try:
+        n = min(loc.count(), 50)
+        for i in range(n):
+            el = loc.nth(i)
+            try:
+                if el.is_visible():
+                    t = el.inner_text(timeout=1000).strip()
+                    if t:
+                        out.append(t.replace("\n", " ")[:200])
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return out
+
+def dump_controls(scope, tag: str):
+    # Buttons
+    btns = scope.locator("button")
+    btn_texts = _visible_texts(btns)
+    print(f"[debug] {tag} visible buttons (<=50):")
+    for t in btn_texts:
+        print("   [btn] ", t)
+
+    # Links
+    links = scope.locator("a")
+    link_texts = _visible_texts(links)
+    print(f"[debug] {tag} visible links (<=50):")
+    for t in link_texts:
+        print("   [link]", t)
+
+    # Any obvious anchors to CSV
+    try:
+        for sel in ["a[download$='.csv']", "a[href$='.csv']", "a[href*='.csv?']"]:
+            cnt = scope.locator(sel).count()
+            print(f"[debug] {tag} selector '{sel}' count={cnt}")
+    except Exception:
+        pass
+
+
 
 def click_download_and_save(page: Page) -> Path:
     """

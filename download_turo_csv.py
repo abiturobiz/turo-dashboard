@@ -318,6 +318,20 @@ def click_download_and_save(page: Page) -> Path:
         log(f"[debug] Current URL: {page.url}")
     except Exception:
         pass
+          # DUMP controls (main page)
+    try:
+        dump_controls(page, tag="main")
+    except Exception:
+        pass
+
+    # DUMP controls (iframes)
+    for f in page.frames:
+        if f == page.main_frame:
+            continue
+        try:
+            dump_controls(f, tag=f"frame:{f.url[:120]}")
+        except Exception:
+            pass
 
     raise RuntimeError("Could not find the 'Download CSV' control. Inspect debug artifacts and adjust selectors.")
 

@@ -350,22 +350,35 @@ def _extract_table_to_csv(scope: Page, hint: str) -> Optional[Path]:
 # Download flow
 # ----------------------------
 def click_download_and_save(page: Page) -> Path:
-    # Let the page settle
+    """
+    Click the visible 'Download CSV' button and wait for the file to download.
+    """
+    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Wait for page to be interactive
     try:
-        page.wait_for_load_state("networkidle", timeout=15_000)
-    except PWTimeout:
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
         pass
 
-    # Try main page
-    if _find_and_click_csv(page):
-        with page.expect_download(timeout=30_000) as dl:
-            pass
-        download = dl.value
-        stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-        target = CSV_DIR / f"turo_earnings_{stamp}.csv"
-        download.save_as(str(target))
-        log(f"Downloaded CSV -> {target}")
-        return target
+    # This button is clearly visible in your screenshot
+    download_button = page.get_by_role("button", name=re.compile(r"Download CSV", re.I)).first
+
+    # Perform the click and wait for the actual download event
+    with page.expect_download(timeout=30000) as download_info:
+        download_button.click()
+
+    download = download_info.value
+
+    # Save file to our downloads folder
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"turo_earnings_{timestamp}.csv"
+    filepath = DOWNLOAD_DIR / filename
+    download.save_as(str(filepath))
+
+    print(f"[download] ✅ Saved CSV to: {filepath}")
+    return filepath
+
 
     # Try frames
     for f in page.frames:

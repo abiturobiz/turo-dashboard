@@ -365,6 +365,12 @@ def main(headless: bool):
 
         try:
             go_to_earnings(page)
+            cur = page.url or ""
+            if "login" in cur or "auth" in cur:
+                # cookie expired/invalid — fail clearly so you know to refresh the secret
+                page.screenshot(path=str(OUT_DIR / "login_redirect.png"))
+                raise RuntimeError("Session cookie invalid: redirected to login. Recreate storage_state.json and update TURO_STORAGE_STATE_B64.")
+  
 
             # Local non-headless: if not seeing export quickly, allow interactive login
             if not storage_state_path and not headless:

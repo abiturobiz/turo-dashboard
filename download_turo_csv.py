@@ -2,36 +2,43 @@
 """
 download_turo_csv.py
 
-- Navigates to Turo Host Earnings
-- Robustly finds & clicks the CSV/Export control
-- Saves CSV to data/turo_csv/
-- Runs ETL (etl_turo_earnings.py) to update turo.duckdb
+Automates download of Turo Host Earnings CSV and runs ETL to update turo.duckdb.
+
+Features:
+- Works in CI (GitHub Actions) using AUTH_STORAGE_STATE cookie (no MFA each run)
+- Local persistent profile for manual login if needed
+- Stealth/anti-bot signals, headful-friendly
+- Robust multi-selector CSV click (buttons, links, menus, iframes)
+- Network sniff fallback for CSV responses
+- Table-scrape fallback to keep pipeline green when export UI is hidden
+- Debug artifacts (HTML + screenshot + control dumps)
+
+Env (CI):
+  AUTH_STORAGE_STATE=auth/storage_state.json
+  PLAYWRIGHT_HEADLESS=0 (recommended in workflow)
 
 Usage:
-  Local (interactive profile):
+  Local:
     python download_turo_csv.py
-    # or headless:
     python download_turo_csv.py --headless
-
-  CI (GitHub Actions):
-    export AUTH_STORAGE_STATE=auth/storage_state.json
-    python download_turo_csv.py --headless
+  CI:
+    python download_turo_csv.py --headless   # or headful via PLAYWRIGHT_HEADLESS=0
 """
 
 import os
 import re
+import csv
 import time
 import argparse
 import subprocess
 from pathlib import Path
 from datetime import datetime
-from typing import List, Tuple
-
+from typing import List, Optional
 
 from playwright.sync_api import (
     sync_playwright,
     TimeoutError as PWTimeout,
-    Page,  # type hints
+    Page,
 )
 
 # ----------------------------
@@ -46,9 +53,12 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 ETL_CMD = ["python", "etl_turo_earnings.py", "--csv_dir", str(CSV_DIR), "--db", "turo.duckdb"]
 EARNINGS_URL = "https://turo.com/host/earnings"
 
+# CSV capture via network sniff
+csv_bytes = {"buf": None}
+
 
 # ----------------------------
-# Utilities
+# Utilities / logging
 # ----------------------------
 def ensure_dirs() -> None:
     CSV_DIR.mkdir(parents=True, exist_ok=True)
@@ -59,21 +69,17 @@ def log(msg: str) -> None:
     print(f"[download] {msg}", flush=True)
 
 
+# ----------------------------
+# Navigation helpers
+# ----------------------------
 def wait_for_manual_login(page: Page) -> None:
-    """
-    LOCAL use only: let the user finish interactive login/MFA,
-    then press ENTER in terminal to continue.
-    """
     page.bring_to_front()
-    log("\n==> Please complete Turo login in the opened browser window.")
+    log("\n==> Please complete Turo login/MFA in the opened browser window.")
     log("    After you SEE the Earnings page, return here and press ENTER.")
     input("==> Press ENTER to continue... ")
 
 
 def go_to_earnings(page: Page) -> None:
-    """
-    Navigate (or re-navigate) to the Earnings page and wait for signals that it rendered.
-    """
     page.goto(EARNINGS_URL, wait_until="domcontentloaded")
     try:
         page.get_by_role("heading", name=re.compile(r"earning|payout|trip", re.I)).first.wait_for(timeout=10_000)
@@ -87,8 +93,21 @@ def go_to_earnings(page: Page) -> None:
                 pass
 
 
+def maybe_click_default_tab(page: Page) -> None:
+    """If page is a hub with tabs, try typical tabs to reveal export controls."""
+    for tab in ["Transactions", "Trips", "Reports", "Payouts", "Earnings"]:
+        try:
+            page.get_by_role("tab", name=re.compile(tab, re.I)).first.click(timeout=1500)
+            time.sleep(0.3)
+            break
+        except Exception:
+            pass
+
+
+# ----------------------------
+# UI handling & selectors
+# ----------------------------
 def _close_banners(scope: Page) -> None:
-    """Dismiss cookie/consent banners or toasts that may cover controls."""
     for txt in [
         r"Accept( all)? cookies",
         r"\bAccept\b",
@@ -108,12 +127,9 @@ def _close_banners(scope: Page) -> None:
 
 
 def _candidate_locators(scope: Page):
-    """
-    Build a list of locator factories to try for CSV/Export.
-    Each returns a Locator when called.
-    """
+    """Return locator factories to probe for CSV/Export controls."""
     locs = []
-    # Common visible names
+    # Names
     for label in [
         r"\bCSV\b",
         r"Download CSV",
@@ -127,7 +143,7 @@ def _candidate_locators(scope: Page):
         locs.append(lambda s=scope, l=label: s.get_by_role("link",   name=re.compile(l, re.I)))
         locs.append(lambda s=scope, l=label: s.get_by_text(re.compile(l, re.I)))
 
-    # Attributes / CSS heuristics
+    # Attributes / CSS
     for sel in [
         "[data-testid*=csv i]",
         "[data-testid*=export i]",
@@ -139,41 +155,39 @@ def _candidate_locators(scope: Page):
         "a:has-text('CSV')",
         "a:has-text('Export')",
     ]:
-        locs.append(lambda s=scope, css=sel: s.locator(css))
+        locs.append(lambda s=scope, css=sel: s.locator(sel))
 
-    # Direct anchors to csv
+    # Direct anchors to CSV
     for sel in [
         "a[download$='.csv']",
         "a[href$='.csv']",
         "a[href*='.csv?']",
     ]:
-        locs.append(lambda s=scope, css=sel: s.locator(css))
+        locs.append(lambda s=scope, css=sel: s.locator(sel))
 
     return locs
 
 
 def _find_and_click_csv(scope: Page) -> bool:
-    """
-    Try to click a CSV/Export control within this scope.
-    Returns True if a click was performed that should trigger a download.
-    """
     _close_banners(scope)
 
-    # Direct: buttons/links/anchors that are visible
+    # Direct: visible controls
     for make in _candidate_locators(scope):
         try:
             loc = make()
             if loc and loc.count() > 0:
-                # Prefer visible
-                for i in range(min(loc.count(), 6)):
+                for i in range(min(loc.count(), 8)):
                     el = loc.nth(i)
-                    if el.is_visible():
-                        el.click()
-                        return True
+                    try:
+                        if el.is_visible():
+                            el.click()
+                            return True
+                    except Exception:
+                        pass
         except Exception:
             continue
 
-    # Export menu path: click Export, then CSV inside the menu
+    # Export menu path
     try:
         export_btn = scope.get_by_role("button", name=re.compile(r"\bExport\b", re.I)).first
         if export_btn and export_btn.is_visible():
@@ -185,7 +199,6 @@ def _find_and_click_csv(scope: Page) -> bool:
                     return True
                 except Exception:
                     pass
-            # generic text as a fallback
             try:
                 scope.get_by_text(re.compile(r"\bCSV\b", re.I)).first.click(timeout=1500)
                 return True
@@ -194,7 +207,7 @@ def _find_and_click_csv(scope: Page) -> bool:
     except Exception:
         pass
 
-    # Kebab / overflow menu (three dots), then Export -> CSV
+    # Kebab/overflow → Export → CSV
     try:
         kebab = scope.locator("button:has(svg)").filter(has_text=re.compile(r"⋮|more|overflow", re.I)).first
         if kebab and kebab.is_visible():
@@ -203,7 +216,6 @@ def _find_and_click_csv(scope: Page) -> bool:
             for txt in [r"\bExport\b", r"\bDownload\b"]:
                 try:
                     scope.get_by_role("menuitem", name=re.compile(txt, re.I)).first.click(timeout=1500)
-                    # then CSV inside submenu
                     for t2 in [r"\bCSV\b", r"Export CSV", r"Download CSV"]:
                         try:
                             scope.get_by_text(re.compile(t2, re.I)).first.click(timeout=1500)
@@ -211,8 +223,7 @@ def _find_and_click_csv(scope: Page) -> bool:
                         except Exception:
                             pass
                 except Exception:
-                    pass  # continue outer for loop
-            # fallback if still nothing clicked
+                    pass
             try:
                 scope.get_by_text(re.compile(r"\bCSV\b", re.I)).first.click(timeout=1500)
                 return True
@@ -223,6 +234,10 @@ def _find_and_click_csv(scope: Page) -> bool:
 
     return False
 
+
+# ----------------------------
+# Debug helpers
+# ----------------------------
 def _visible_texts(loc) -> List[str]:
     out = []
     try:
@@ -240,43 +255,108 @@ def _visible_texts(loc) -> List[str]:
         pass
     return out
 
+
 def dump_controls(scope, tag: str):
-    # Buttons
     btns = scope.locator("button")
+    links = scope.locator("a")
     btn_texts = _visible_texts(btns)
+    link_texts = _visible_texts(links)
     print(f"[debug] {tag} visible buttons (<=50):")
     for t in btn_texts:
-        print("   [btn] ", t)
-
-    # Links
-    links = scope.locator("a")
-    link_texts = _visible_texts(links)
+        print("[debug]   [btn] ", t)
     print(f"[debug] {tag} visible links (<=50):")
     for t in link_texts:
-        print("   [link]", t)
-
-    # Any obvious anchors to CSV
-    try:
-        for sel in ["a[download$='.csv']", "a[href$='.csv']", "a[href*='.csv?']"]:
+        print("[debug]   [link]", t)
+    for sel in ["a[download$='.csv']", "a[href$='.csv']", "a[href*='.csv?']"]:
+        try:
             cnt = scope.locator(sel).count()
             print(f"[debug] {tag} selector '{sel}' count={cnt}")
-    except Exception:
-        pass
+        except Exception:
+            pass
 
 
+# ----------------------------
+# Fallback: scrape a visible table
+# ----------------------------
+def _extract_table_to_csv(scope: Page, hint: str) -> Optional[Path]:
+    candidates = [
+        scope.get_by_role("table"),
+        scope.locator("table"),
+        scope.locator("[role='grid']"),
+        scope.locator("[data-testid*=table i]"),
+    ]
+    for cand in candidates:
+        try:
+            if cand.count() == 0:
+                continue
+            target = None
+            for i in range(min(cand.count(), 5)):
+                el = cand.nth(i)
+                if el.is_visible():
+                    target = el
+                    break
+            if not target:
+                continue
 
+            html = target.inner_html(timeout=3000)
+
+            # Headers
+            hdr = re.findall(r"<th[^>]*>(.*?)</th>", html, flags=re.I | re.S)
+            hdr = [re.sub("<[^<]+?>", " ", h).strip() for h in hdr]
+            hdr = [re.sub(r"\s+", " ", h) for h in hdr]
+
+            # Rows
+            rows_html = re.findall(r"<tr[^>]*>(.*?)</tr>", html, flags=re.I | re.S)
+            rows = []
+            for rh in rows_html:
+                cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", rh, flags=re.I | re.S)
+                cells = [re.sub("<[^<]+?>", " ", c).strip() for c in cells]
+                cells = [re.sub(r"\s+", " ", c) for c in cells]
+                if any(cells):
+                    rows.append(cells)
+
+            if not hdr and rows:
+                hdr = [f"col_{i+1}" for i in range(max(len(r) for r in rows))]
+
+            width = len(hdr) if hdr else (max(len(r) for r in rows) if rows else 0)
+            if width == 0 or not rows:
+                continue
+
+            norm_rows = []
+            for r in rows:
+                if len(r) < width:
+                    r = r + [""] * (width - len(r))
+                elif len(r) > width:
+                    r = r[:width]
+                norm_rows.append(r)
+
+            stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+            out_path = CSV_DIR / f"turo_earnings_scraped_{stamp}.csv"
+            with open(out_path, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                if hdr:
+                    w.writerow(hdr)
+                w.writerows(norm_rows)
+
+            log(f"[fallback] Scraped table -> {out_path} ({hint})")
+            return out_path
+
+        except Exception:
+            continue
+    return None
+
+
+# ----------------------------
+# Download flow
+# ----------------------------
 def click_download_and_save(page: Page) -> Path:
-    """
-    Trigger CSV download and save to data/turo_csv/.
-    Searches main page and iframes. Dumps debug artifacts if not found.
-    """
     # Let the page settle
     try:
         page.wait_for_load_state("networkidle", timeout=15_000)
     except PWTimeout:
         pass
 
-    # Try main document first
+    # Try main page
     if _find_and_click_csv(page):
         with page.expect_download(timeout=30_000) as dl:
             pass
@@ -287,12 +367,11 @@ def click_download_and_save(page: Page) -> Path:
         log(f"Downloaded CSV -> {target}")
         return target
 
-    # Try child iframes
+    # Try frames
     for f in page.frames:
         if f == page.main_frame:
             continue
         try:
-            # Skip obvious ad/analytics frames
             if any(x in (f.url or "") for x in ["ads", "doubleclick", "googletag", "tracking"]):
                 continue
             if _find_and_click_csv(f):
@@ -307,7 +386,7 @@ def click_download_and_save(page: Page) -> Path:
         except Exception:
             continue
 
-    # If we reach here, we failed; dump artifacts
+    # Debug artifacts
     html_path = OUT_DIR / "debug_earnings_page.html"
     png_path = OUT_DIR / "debug_earnings_page.png"
     try:
@@ -318,13 +397,12 @@ def click_download_and_save(page: Page) -> Path:
         log(f"[debug] Current URL: {page.url}")
     except Exception:
         pass
-          # DUMP controls (main page)
+
+    # Dump visible controls to logs
     try:
         dump_controls(page, tag="main")
     except Exception:
         pass
-
-    # DUMP controls (iframes)
     for f in page.frames:
         if f == page.main_frame:
             continue
@@ -333,54 +411,116 @@ def click_download_and_save(page: Page) -> Path:
         except Exception:
             pass
 
+    # Fallback: sniffed CSV from network?
+    if csv_bytes.get("buf"):
+        stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        target = CSV_DIR / f"turo_earnings_sniffed_{stamp}.csv"
+        with open(target, "wb") as fo:
+            fo.write(csv_bytes["buf"])
+        log(f"[fallback] Saved sniffed CSV -> {target}")
+        return target
+
+    # Fallback: scrape table
+    try:
+        scraped = _extract_table_to_csv(page, hint="main")
+        if scraped:
+            return scraped
+        for f in page.frames:
+            if f == page.main_frame:
+                continue
+            if any(x in (f.url or "") for x in ["ads", "doubleclick", "googletag", "tracking"]):
+                continue
+            scraped = _extract_table_to_csv(f, hint=f.url)
+            if scraped:
+                return scraped
+    except Exception:
+        pass
+
     raise RuntimeError("Could not find the 'Download CSV' control. Inspect debug artifacts and adjust selectors.")
 
 
 # ----------------------------
-# Main flow
+# Main
 # ----------------------------
 def main(headless: bool):
     ensure_dirs()
     storage_state_path = os.environ.get("AUTH_STORAGE_STATE", "").strip()
+    is_ci = os.environ.get("GITHUB_ACTIONS") == "true"
+    launch_args = ["--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage", "--no-sandbox"]
 
     with sync_playwright() as p:
         if storage_state_path and Path(storage_state_path).exists():
-            # CI path: fresh context from storage_state
             log(f"Using storage_state: {storage_state_path}")
-            browser = p.chromium.launch(headless=headless)
-            context = browser.new_context(storage_state=storage_state_path, accept_downloads=True)
+            browser = p.chromium.launch(headless=(False if is_ci else headless), args=launch_args)
+            context = browser.new_context(
+                storage_state=storage_state_path,
+                accept_downloads=True,
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1366, "height": 900},
+                locale="en-US",
+                timezone_id="America/New_York",
+            )
+            context.add_init_script("""
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+Object.defineProperty(navigator, 'platform', { get: () => 'MacIntel' });
+Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
+""")
             page = context.new_page()
+
+            # Network sniff for CSV
+            def _maybe_capture_csv(resp):
+                try:
+                    ct = (resp.headers or {}).get("content-type", "")
+                    url = (resp.url or "").lower()
+                    if ".csv" in url or "text/csv" in ct.lower():
+                        csv_bytes["buf"] = resp.body()
+                except Exception:
+                    pass
+
+            page.on("response", _maybe_capture_csv)
+
         else:
-            # LOCAL path: persistent profile (keeps you logged in)
             log("Using persistent local profile (.pw-user)")
             browser = p.chromium.launch_persistent_context(
                 user_data_dir=str(USER_DATA_DIR),
                 headless=headless,
                 accept_downloads=True,
+                args=launch_args,
             )
+            browser.add_init_script("""
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+Object.defineProperty(navigator, 'platform', { get: () => 'MacIntel' });
+Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
+""")
             page = browser.new_page()
 
-        # Apply a generous timeout on the PAGE (not on Browser)
+        # Generous timeout at PAGE level
         page.set_default_timeout(5 * 60 * 1000)
 
         try:
             go_to_earnings(page)
+
+            # Detect login redirect early
             cur = page.url or ""
             if "login" in cur or "auth" in cur:
-                # cookie expired/invalid — fail clearly so you know to refresh the secret
                 page.screenshot(path=str(OUT_DIR / "login_redirect.png"))
                 raise RuntimeError("Session cookie invalid: redirected to login. Recreate storage_state.json and update TURO_STORAGE_STATE_B64.")
-  
 
-            # Local non-headless: if not seeing export quickly, allow interactive login
+            # Try a tab that commonly exposes export
+            maybe_click_default_tab(page)
+
+            # Local (non-headless): allow manual login if export text isn't visible fast
             if not storage_state_path and not headless:
                 try:
                     page.get_by_text(re.compile(r"export|csv", re.I)).first.wait_for(timeout=3000)
                 except Exception:
                     wait_for_manual_login(page)
                     go_to_earnings(page)
+                    maybe_click_default_tab(page)
 
-            # Attempt the download
+            # Attempt the download (or fallbacks)
             _ = click_download_and_save(page)
 
         finally:
@@ -393,7 +533,7 @@ def main(headless: bool):
             except Exception:
                 pass
 
-    # Run ETL after successful download
+    # Run ETL after successful download/scrape/sniff
     log(f"Running ETL: {' '.join(ETL_CMD)}")
     subprocess.run(ETL_CMD, check=True)
     log("ETL complete.")

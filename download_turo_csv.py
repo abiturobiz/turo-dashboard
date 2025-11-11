@@ -51,7 +51,8 @@ CSV_DIR.mkdir(parents=True, exist_ok=True)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 ETL_CMD = ["python", "etl_turo_earnings.py", "--csv_dir", str(CSV_DIR), "--db", "turo.duckdb"]
-EARNINGS_URL = "https://turo.com/host/earnings"
+EARNINGS_URL = "https://turo.com/us/en/business/earnings?year=2025"
+
 
 # CSV capture via network sniff
 csv_bytes = {"buf": None}

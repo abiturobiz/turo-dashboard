@@ -33,13 +33,13 @@ jobs:
           echo "$TURO_STORAGE_STATE_B64" | base64 -d > auth/storage_state.json
           test -s auth/storage_state.json || (echo "storage_state missing" && exit 1)
 
-      - name: Run downloader + ETL (headful)
+      - name: Run downloader + ETL (headful via Xvfb)
         env:
           AUTH_STORAGE_STATE: auth/storage_state.json
-          PLAYWRIGHT_HEADLESS: "0"
+          PLAYWRIGHT_HEADLESS: "0"   # tell code we want headful
         run: |
-          python download_turo_csv.py
-
+          xvfb-run -a python download_turo_csv.py
+      
       - name: Upload debug artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -49,6 +49,7 @@ jobs:
             out/**
             data/turo_csv/**
           if-no-files-found: ignore
+
 
       - name: Commit updated data
         run: |

@@ -44,6 +44,7 @@ from playwright.sync_api import (
 # ----------------------------
 # Paths / constants
 # ----------------------------
+DOWNLOAD_DIR = Path("data/turo_csv")
 CSV_DIR = Path("data/turo_csv")
 OUT_DIR = Path("out")
 USER_DATA_DIR = Path(".pw-user")  # local persistent chromium profile

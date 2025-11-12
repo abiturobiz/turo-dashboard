@@ -377,34 +377,98 @@ def _extract_table_to_csv(scope: Page, hint: str) -> Optional[Path]:
 # Download flow
 # ----------------------------
 def click_download_and_save(page: Page) -> Path:
-    """
-    Click the visible 'Download CSV' button and wait for the file to download.
-    """
-    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Wait for page to be interactive
+    # Ensure we are on the business earnings page (the one with the visible Download CSV button)
+    year = datetime.utcnow().year
     try:
-        page.wait_for_load_state("networkidle", timeout=15000)
+        page.goto(f"https://turo.com/us/en/business/earnings?year={year}", wait_until="domcontentloaded")
+    except Exception:
+        pass
+    try:
+        page.wait_for_load_state("networkidle", timeout=15_000)
     except Exception:
         pass
 
-    # This button is clearly visible in your screenshot
-    download_button = page.get_by_role("button", name=re.compile(r"Download CSV", re.I)).first
+    # Make sure overlays are gone and the button is in view
+    _close_chat_and_overlays(page)
+    try:
+        page.mouse.wheel(0, 2000)
+        page.wait_for_timeout(500)
+    except Exception:
+        pass
 
-    # Perform the click and wait for the actual download event
-    with page.expect_download(timeout=30000) as download_info:
-        download_button.click()
+    # Robust locator candidates for "Download CSV"
+    locators = [
+        page.get_by_role("button", name=re.compile(r"Download CSV", re.I)).first,
+        page.get_by_text(re.compile(r"^\\s*Download\\s+CSV\\s*$", re.I)).first,
+        page.locator("button:has-text('Download CSV')").first,
+        page.locator("a:has-text('Download CSV')").first,
+        page.locator("css=[data-testid*='download' i]").filter(has_text=re.compile(r"CSV", re.I)).first,
+        page.locator("xpath=//*[self::button or self::a or self::*[@role='button']][contains(normalize-space(.), 'Download CSV')]").first,
+    ]
 
-    download = download_info.value
+    # Try each locator: scroll into view and click inside expect_download
+    for loc in locators:
+        try:
+            if loc and loc.count() > 0:
+                el = loc
+                el.scroll_into_view_if_needed(timeout=2000)
+                with page.expect_download(timeout=30_000) as dl:
+                    el.click(force=True, timeout=5000)
+                download = dl.value
+                stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+                target = CSV_DIR / f"turo_earnings_{stamp}.csv"
+                download.save_as(str(target))
+                log(f"Downloaded CSV -> {target}")
+                return target
+        except Exception:
+            # Try a small nudge scroll and continue
+            try:
+                page.mouse.wheel(0, 1200)
+                page.wait_for_timeout(300)
+            except Exception:
+                pass
 
-    # Save file to our downloads folder
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"turo_earnings_{timestamp}.csv"
-    filepath = DOWNLOAD_DIR / filename
-    download.save_as(str(filepath))
+    # FINAL JS fallback: query any element whose text includes "Download CSV" and click it
+    try:
+        found = page.evaluate_handle("""
+() => {
+  const nodes = Array.from(document.querySelectorAll('button, a, [role="button"], [data-testid], [class]'));
+  const needle = /download\\s*csv/i;
+  for (const n of nodes) {
+    const t = (n.innerText || n.textContent || '').trim();
+    if (needle.test(t)) return n;
+  }
+  return null;
+}
+""")
+        if found and found.as_element():
+            page.evaluate("(n) => n.scrollIntoView({behavior:'instant', block:'center'})", found)
+            with page.expect_download(timeout=30_000) as dl:
+                page.evaluate("(n) => n.click()", found)
+            download = dl.value
+            stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+            target = CSV_DIR / f"turo_earnings_{stamp}.csv"
+            download.save_as(str(target))
+            log(f"Downloaded CSV (JS fallback) -> {target}")
+            return target
+    except Exception:
+        pass
 
-    print(f"[download] ✅ Saved CSV to: {filepath}")
-    return filepath
+    # If still failing, dump debug artifacts as before
+    html_path = OUT_DIR / "debug_earnings_page.html"
+    png_path = OUT_DIR / "debug_earnings_page.png"
+    try:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        html = page.content()
+        html_path.write_text(html, encoding="utf-8")
+        page.screenshot(path=str(png_path), full_page=True)
+        log(f"[debug] Could not click Download CSV. Saved HTML: {html_path}, screenshot: {png_path}")
+        log(f"[debug] Current URL: {page.url}")
+    except Exception:
+        pass
+
+    raise RuntimeError("Could not click the 'Download CSV' button on business earnings page.")
+
 
 
     # Try frames

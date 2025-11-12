@@ -58,6 +58,31 @@ EARNINGS_URL = "https://turo.com/us/en/business/earnings?year=2025"
 # CSV capture via network sniff
 csv_bytes = {"buf": None}
 
+def _close_chat_and_overlays(page: Page):
+    # Close obvious chat / overlays that can block clicks
+    for txt in [r"Close chat", r"Dismiss", r"Got it", r"Accept( all)? cookies", r"\bAccept\b"]:
+        try:
+            page.get_by_role("button", name=re.compile(txt, re.I)).first.click(timeout=1200)
+        except Exception:
+            pass
+    # Nuke common chat iframes/bubbles
+    try:
+        page.evaluate("""
+(() => {
+  const killers = [
+    'iframe[src*="intercom"]',
+    'iframe[src*="helpshift"]',
+    'iframe[src*="zendesk"]',
+    '.intercom-lightweight-app',
+    '[data-testid*="chat"]',
+    '[class*="chat"]'
+  ];
+  killers.forEach(sel => document.querySelectorAll(sel).forEach(n => n.remove()));
+})();
+""")
+    except Exception:
+        pass
+
 
 # ----------------------------
 # Utilities / logging

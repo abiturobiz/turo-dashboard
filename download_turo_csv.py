@@ -144,6 +144,15 @@ def go_to_business_earnings(page: Page, year: int) -> None:
         _dump_debug(page, "login_redirect")
         raise RuntimeError("Session cookie invalid: redirected to login. Recreate storage_state.json and update TURO_STORAGE_STATE_B64.")
 
+def switch_to_host_earnings(page: Page):
+    """If on business earnings, switch to host earnings."""
+    if "business/earnings" in page.url:
+        log("Detected Business Earnings page. Switching to Host Earnings...")
+        page.goto(EARNINGS_URL, wait_until="domcontentloaded")
+        # Wait for redirect to complete
+        page.wait_for_url(lambda url: "host/earnings" in url, timeout=10_000)
+        log("Switched to Host Earnings.")
+
 # ----------------------------
 # Click the "Download CSV" and save the file
 # ----------------------------
@@ -278,6 +287,7 @@ Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
             # 1) Navigate straight to Business → Earnings (this is where "Download CSV" lives)
             year = datetime.utcnow().year
             go_to_business_earnings(page, year)
+            switch_to_host_earnings(page)
 
             # 2) Try to click the button and save the CSV
             _ = click_download_and_save(page)

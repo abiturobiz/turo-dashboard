@@ -287,6 +287,7 @@ Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
             # 1) Navigate straight to Business → Earnings (this is where "Download CSV" lives)
             year = datetime.utcnow().year
             go_to_business_earnings(page, year)
+            EARNINGS_URL = "https://turo.com/host/earnings"
             switch_to_host_earnings(page)
 
             # 2) Try to click the button and save the CSV

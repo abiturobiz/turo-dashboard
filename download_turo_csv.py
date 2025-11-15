@@ -127,30 +127,38 @@ def _dump_controls(page: Page, tag: str = "main") -> None:
             print(f"[debug] {tag} [link] {t}")
     except Exception:
         pass
+def safe_goto(page: Page, url: str, delay_ms: int = 4000):
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_timeout(delay_ms)  # ⏸ small settle time (4s)
+    try:
+        page.wait_for_load_state("networkidle", timeout=10_000)
+    except PWTimeout:
+        pass
 
 # ----------------------------
 # Navigation to Business → Earnings
 # ----------------------------
 def go_to_business_earnings(page: Page, year: int) -> None:
     url = earnings_url_for(year)
-    page.goto(url, wait_until="domcontentloaded")
-    try:
-        page.wait_for_load_state("networkidle", timeout=10_000)
-    except PWTimeout:
-        pass
+    safe_goto(page, url, delay_ms=4000)
 
     # If we ever get bounced to login, fail early
     if re.search(r"/login|/auth", page.url or "", re.I):
         _dump_debug(page, "login_redirect")
         raise RuntimeError("Session cookie invalid: redirected to login. Recreate storage_state.json and update TURO_STORAGE_STATE_B64.")
 
+
 def switch_to_host_earnings(page: Page):
     """If on business earnings, switch to host earnings."""
-    if "business/earnings" in page.url:
+    if "business/earnings" in (page.url or ""):
         log("Detected Business Earnings page. Switching to Host Earnings...")
-        page.goto(EARNINGS_URL, wait_until="domcontentloaded")
-        # Wait for redirect to complete
-        page.wait_for_url(lambda url: "host/earnings" in url, timeout=10_000)
+        host_url = "https://turo.com/host/earnings"
+        safe_goto(page, host_url, delay_ms=2000)
+        try:
+            page.wait_for_url(lambda u: "host/earnings" in (u or ""), timeout=10_000)
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)  # extra 1s for React to bind handlers
         log("Switched to Host Earnings.")
 
 # ----------------------------
@@ -158,6 +166,8 @@ def switch_to_host_earnings(page: Page):
 # ----------------------------
 def click_download_and_save(page: Page) -> Path:
     _close_overlays(page)
+    page.wait_for_timeout(800)  # give the UI a beat to render the button
+
 
     # Make sure the control is in view
     try:
